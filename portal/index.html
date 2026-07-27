@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>physics-frontier · full-rate dense linear algebra for physics on one RTX 3080</title>
+<meta name="description" content="Measured ~1.9x speedups for dense physics GEMMs on a consumer RTX 3080 (Ampere, sm_86) by switching the tensor-core accumulator from fp32 to fp16, where ~1e-3 relative error is acceptable. Every concept explained.">
+<style>
+  :root{
+    --ink:#0A0D13; --panel:#10151F; --panel2:#0D111A; --line:#1E2736; --line2:#28344A;
+    --text:#E7ECF3; --muted:#8592A6; --dim:#4C586E;
+    --slow:#E8974C; --fast:#3FD98A; --vio:#8C7CF0;
+    --slow-dim:#4a3826; --fast-dim:#103a24; --vio-dim:#241f4a;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--ink); color:var(--text); font-family:var(--sans);
+    line-height:1.6; letter-spacing:.01em;
+    background-image:linear-gradient(var(--panel2) 1px,transparent 1px),linear-gradient(90deg,var(--panel2) 1px,transparent 1px);
+    background-size:44px 44px; background-position:center top;
+  }
+  .wrap{max-width:960px;margin:0 auto;padding:0 24px}
+  .narrow{max-width:720px}
+  a{color:var(--fast);text-decoration:none;border-bottom:1px solid var(--line2)}
+  a:hover{border-color:var(--fast)}
+  .mono{font-family:var(--mono)}
+  p{margin:0 0 16px}
+  code{font-family:var(--mono);font-size:.92em;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:2px 6px;color:var(--text)}
+  .snippet{font-family:var(--mono);font-size:13px;line-height:1.7;background:var(--panel);border:1px solid var(--line);border-left:2px solid var(--fast);border-radius:0 6px 6px 0;padding:14px 18px;margin:18px 0;color:var(--text);overflow-x:auto}
+  .snippet .c{color:var(--dim)}
+
+  /* masthead + nav */
+  .mast{border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;background:rgba(10,13,19,.86);backdrop-filter:blur(8px)}
+  .mast .wrap{padding:16px 24px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+  .brand{font-family:var(--mono);font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  .brand b{color:var(--text);font-weight:600}
+  .nav{display:flex;gap:20px;font-family:var(--mono);font-size:12px}
+  .nav a{color:var(--dim);border:0} .nav a:hover{color:var(--fast)}
+
+  /* hero */
+  .hero{padding:60px 0 12px}
+  .thesis{font-size:clamp(28px,5vw,50px);line-height:1.05;font-weight:660;letter-spacing:-.018em;margin:0 0 16px;max-width:22ch}
+  .thesis em{font-style:normal;color:var(--fast)}
+  .lede{color:var(--muted);max-width:64ch;margin:0 0 18px;font-size:17px}
+  .lede2{color:var(--dim);max-width:64ch;margin:0;font-size:14.5px}
+  .stripe{display:flex;gap:26px;flex-wrap:wrap;margin:32px 0 0;padding:18px 0 0;border-top:1px solid var(--line);font-family:var(--mono);font-size:12.5px}
+  .stripe div{color:var(--dim)} .stripe b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+  .stripe .x{color:var(--fast)}
+
+  /* section scaffolding */
+  .sec{margin:88px 0 0}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin:0 0 16px;display:flex;align-items:center;gap:12px}
+  .eyebrow::after{content:"";flex:1;height:1px;background:var(--line)}
+  .eyebrow .n{color:var(--fast)}
+  .sec.accent .eyebrow .n{color:var(--vio)}
+  h2{font-size:26px;font-weight:660;letter-spacing:-.012em;margin:0 0 12px}
+  h3.blk{font-size:19px;font-weight:620;margin:40px 0 8px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:15.5px;max-width:70ch;margin:0 0 18px}
+  .kicker{color:var(--text);font-weight:600}
+
+  /* primer / context callouts */
+  .primer{background:var(--panel2);border:1px solid var(--line);border-left:2px solid var(--line2);border-radius:0 6px 6px 0;padding:16px 20px;margin:18px 0;font-size:14.5px;color:var(--muted);max-width:74ch}
+  .primer b{color:var(--text);font-weight:600}
+  .primer .h{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);display:block;margin-bottom:7px}
+
+  /* details deep-dives */
+  details.deep{border:1px solid var(--line);border-radius:6px;margin:14px 0;background:var(--panel)}
+  details.deep>summary{cursor:pointer;padding:13px 18px;font-family:var(--mono);font-size:12.5px;letter-spacing:.03em;color:var(--fast);list-style:none;display:flex;align-items:center;gap:10px}
+  .sec.accent details.deep>summary{color:var(--vio)}
+  details.deep>summary::-webkit-details-marker{display:none}
+  details.deep>summary::before{content:"+";font-size:15px;color:var(--dim);width:12px}
+  details.deep[open]>summary::before{content:"–"}
+  details.deep[open]>summary{border-bottom:1px solid var(--line)}
+  details.deep .body{padding:16px 18px;font-size:14.5px;color:var(--muted);max-width:74ch}
+  details.deep .body p:last-child{margin-bottom:0}
+  details.deep .body b{color:var(--text);font-weight:600}
+
+  /* signature: apply race */
+  .scope{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:6px;padding:22px 22px 18px;position:relative;overflow:hidden;margin:24px 0}
+  .scope-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:12px;flex-wrap:wrap}
+  .scope-title{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+  .replay{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);background:transparent;border:1px solid var(--line2);border-radius:3px;padding:6px 12px;cursor:pointer}
+  .replay:hover{color:var(--text);border-color:var(--fast)}
+  .replay:focus-visible{outline:2px solid var(--fast);outline-offset:2px}
+  .lane{margin:16px 0}
+  .lane-top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:7px;font-family:var(--mono);font-size:12.5px}
+  .lane-name .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;vertical-align:middle}
+  .lane-read{color:var(--muted)} .lane-read b{font-variant-numeric:tabular-nums}
+  .track{position:relative;height:14px;background:#0a0e16;border:1px solid var(--line);border-radius:2px;overflow:hidden}
+  .fill{position:absolute;top:0;left:0;height:100%;width:0}
+  .lane.slow .dot{background:var(--slow)} .lane.slow .fill{background:linear-gradient(90deg,var(--slow-dim),var(--slow))} .lane.slow .lane-name b{color:var(--slow)}
+  .lane.fast .dot{background:var(--fast)} .lane.fast .fill{background:linear-gradient(90deg,var(--fast-dim),var(--fast))} .lane.fast .lane-name b{color:var(--fast)}
+  .playhead{position:absolute;top:-3px;width:2px;height:20px;background:var(--text);opacity:.6}
+  .verdict{margin-top:20px;padding-top:16px;border-top:1px dashed var(--line);font-family:var(--mono);font-size:13px;color:var(--muted);min-height:20px}
+  .verdict b{color:var(--fast);font-variant-numeric:tabular-nums}
+
+  /* ladder */
+  .ladder{margin:22px 0}
+  .rung{display:grid;grid-template-columns:230px 1fr 128px;gap:16px;align-items:center;padding:13px 0;border-bottom:1px solid var(--line)}
+  .rung:first-child{border-top:1px solid var(--line)}
+  .rung-label{font-family:var(--mono);font-size:13px}
+  .rung-label .kindmark{color:var(--dim);margin-right:8px}
+  .rung.baseline .rung-label{color:var(--slow)} .rung.opt .rung-label{color:var(--fast)}
+  .rung.floor .rung-label,.rung.neutral .rung-label{color:var(--muted)}
+  .bar-cell{position:relative;height:26px}
+  .bar{position:absolute;top:0;left:0;height:100%;min-width:2px;border-radius:2px;display:flex;align-items:center;justify-content:flex-end;padding-right:9px;font-family:var(--mono);font-size:12px;color:var(--ink);font-weight:600;transition:width .9s cubic-bezier(.2,.7,.2,1)}
+  .rung.floor .bar{background:#2b3446;color:var(--muted)}
+  .rung.baseline .bar{background:linear-gradient(90deg,var(--slow-dim),var(--slow))}
+  .rung.opt .bar{background:linear-gradient(90deg,var(--fast-dim),var(--fast))}
+  .rung.neutral .bar{background:#3a465e;color:#c2ccdd}
+  .rung-tail{font-family:var(--mono);font-size:13px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+  .rung-tail b{color:var(--text);font-weight:600}
+  .rung-note{grid-column:1/-1;color:var(--dim);font-size:12.5px;margin:2px 0 0;max-width:84ch}
+
+  /* headline stat */
+  .stat{display:flex;gap:22px;align-items:center;background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:6px;padding:22px 24px;margin:22px 0}
+  .stat .big{font-family:var(--mono);font-size:clamp(32px,6vw,50px);font-weight:680;color:var(--vio);line-height:1;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .stat .big small{font-size:.36em;color:var(--muted);font-weight:500;letter-spacing:.03em}
+  .stat .txt{color:var(--muted);font-size:14.5px}
+  .stat .txt b{color:var(--text);font-weight:600}
+
+  /* family / contribution cards */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin:22px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:20px}
+  .card .tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin-bottom:10px}
+  .card .tag.ship{color:var(--fast)} .card .tag.study{color:var(--slow)}
+  .card h3{font-size:14.5px;margin:0 0 8px;font-weight:600}
+  .card p{margin:0 0 8px;color:var(--muted);font-size:13px} .card p:last-child{margin:0}
+  .card .fig{font-family:var(--mono);color:var(--text)}
+
+  /* findings grid */
+  .finds{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:24px 0}
+  .find{background:var(--panel);padding:20px}
+  .find h3{font-size:14px;margin:0 0 7px;font-weight:600}
+  .find p{margin:0;color:var(--muted);font-size:13.5px}
+  .find .fig{font-family:var(--mono);color:var(--fast)}
+  .sec.accent .find .fig{color:var(--vio)}
+
+  /* glossary */
+  .glossary{columns:2;column-gap:32px;margin:22px 0}
+  .defn{break-inside:avoid;margin:0 0 16px;font-size:14px}
+  .defn dt{font-weight:600;color:var(--text);font-family:var(--mono);font-size:13px}
+  .defn dd{margin:4px 0 0;color:var(--muted)}
+  @media (max-width:640px){.glossary{columns:1}}
+
+  footer{margin:88px 0 56px;padding-top:22px;border-top:1px solid var(--line);color:var(--dim);font-family:var(--mono);font-size:12px;line-height:1.9}
+  footer b{color:var(--muted);font-weight:500}
+  .caveat{color:var(--slow)}
+
+  @media (max-width:640px){
+    .rung{grid-template-columns:120px 1fr;gap:10px}.rung-tail{grid-column:2;text-align:left}
+    .stat{flex-direction:column;align-items:flex-start;gap:12px}
+    .nav{display:none}
+  }
+  @media (prefers-reduced-motion:reduce){.bar,.fill{transition:none}}
+</style>
+</head>
+<body>
+  <header class="mast"><div class="wrap">
+    <div class="brand">physics&#8209;<b>frontier</b></div>
+    <nav class="nav">
+      <a href="#workloads">workloads</a><a href="#lever">the lever</a><a href="#results">results</a><a href="#accuracy">accuracy</a><a href="#glossary">glossary</a>
+    </nav>
+  </div></header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1 class="thesis">The hot loop of physics is a <em>dense matrix multiply</em>.</h1>
+      <p class="lede">Dense linear solves, kernel and covariance methods, reduced-order models, and PDE Green's-function applies share one operation, multiplying a big matrix by a block of many columns. On a consumer RTX 3080 that multiply runs at half the speed the chip can reach, because the standard math library keeps the running sum in the safer of two precisions. Where about 1e-3 relative error is acceptable, one flag doubles the rate.</p>
+      <p class="lede2">Written to be read cold. Each term is explained where it appears, with mechanics behind the expandable panels and a glossary at the end. Every number was measured on one RTX 3080 (Ampere, sm_86).</p>
+      <div class="stripe">
+        <div>Matrix-inverse apply &nbsp;<b class="x">1.91×</b> faster</div>
+        <div>PDE Green's-function apply &nbsp;<b class="x">1.84×</b> faster</div>
+        <div>at &nbsp;<b class="x">~1e-3</b> relative error · one flag, no custom CUDA</div>
+      </div>
+    </section>
+
+    <div class="primer narrow">
+      <span class="h">The shared setup</span>
+      <p>A <b>GEMM</b> (general matrix-matrix multiply) computes C = A·B, where every entry of C is a dot product of a row of A with a column of B. It is the densest, most regular numerical work a computer does, and GPUs are built to run it fast.</p>
+      <p style="margin-bottom:0"><b>The hardware.</b> One consumer NVIDIA RTX 3080 (Ampere, compute capability sm_86). Its <b>tensor cores</b> multiply fp16 inputs while keeping the running sum in either fp16 or fp32. On this chip the fp16-accumulate path issues at full rate and the fp32-accumulate path at half rate. cuBLAS, the standard library under PyTorch, picks fp32 accumulation by default, so the ordinary path runs at half the speed the silicon can reach.</p>
+    </div>
+
+    <!-- ============================= WORKLOADS ============================= -->
+    <section class="sec" id="workloads">
+      <p class="eyebrow"><span class="n">01</span> where the time goes</p>
+      <h2>Why physics compute is a matrix multiply</h2>
+      <p class="sub">Four workloads that look different on paper run the same operation underneath. Each forms an operator or factorization once, then applies it to a block of many right-hand sides, and that block apply is a large dense GEMM.</p>
+
+      <h3 class="blk">Dense linear solve</h3>
+      <p class="sub">Solving A&#8202;x = b for a single right-hand side is cheap. Real problems solve A&#8202;X = B for hundreds or thousands of columns at once, one per source, target, or parameter sample. Factor or invert A once, then every solve is X = A⁻¹B, a dense matrix multiply across the whole block.</p>
+
+      <h3 class="blk">Covariance and kernel matrices</h3>
+      <p class="sub">Gaussian-process regression, kernel ridge regression, RBF field interpolation, and data assimilation build a dense n×n kernel matrix K, where K<sub>ij</sub> measures similarity between points i and j. Fitting and prediction solve against K + λI. The matrix is genuinely dense, and prediction multiplies the solved operator against many query blocks. This is the exact system measured below.</p>
+
+      <h3 class="blk">Reduced-order models</h3>
+      <p class="sub">A reduced-order model compresses a large simulation onto a small basis of a few hundred modes, then advances the small dense system in time. Each step multiplies the reduced operator by the current state across many parameter settings or ensemble members, again a dense matmul. This one is explained here rather than benchmarked.</p>
+
+      <h3 class="blk">PDE Green's-function apply</h3>
+      <p class="sub">For a linear PDE with fixed coefficients, the solution operator is a Green's function that returns the field from the sources. Discretized, that operator is a dense matrix M, and solving for many source configurations is X = M&#8202;F, one column per configuration. The screened-Poisson operator below is measured this way.</p>
+
+      <details class="deep">
+        <summary>Why "many right-hand sides" puts the work on the tensor cores</summary>
+        <div class="body">
+          <p>A matmul's speed limit depends on its <b>arithmetic intensity</b>, the ratio of math done to bytes moved from memory. Applying an operator to a single column reads the whole matrix to do very little math, so it waits on memory. Applying it to a block of R columns reuses each loaded matrix value R times, so the math dwarfs the traffic.</p>
+          <p>For the inverse apply below (n=8192, R=2048), one call does 2·n²·R ≈ 2.7×10¹¹ floating-point operations against roughly 0.2&nbsp;GB of memory traffic, about <b>1,400 operations per byte</b>. That sits far inside the regime where math throughput, not memory bandwidth, is the ceiling. So the operation runs at the tensor cores' arithmetic limit, and the accumulator rate is what sets that limit.</p>
+        </div>
+      </details>
+    </section>
+
+    <!-- ============================= LEVER ============================= -->
+    <section class="sec" id="lever">
+      <p class="eyebrow"><span class="n">02</span> the lever</p>
+      <h2>One flag flips the accumulator</h2>
+      <p class="sub">A matmul sums thousands of products into a running total called the <b>accumulator</b>. Its precision is a separate choice from the input precision, and on this GPU it sets the speed.</p>
+
+      <p>Tensor cores take fp16 inputs and keep the running sum in fp16 or fp32. fp32 holds about seven decimal digits and rounds gently; fp16 holds about three and rounds hard. cuBLAS keeps the sum in fp32 by default so results stay accurate for any input. On sm_86 GeForce silicon the fp32-accumulate path issues at half the rate of the fp16-accumulate path, so the default runs the tensor cores at half speed.</p>
+
+      <p>Choosing fp16 accumulation runs the same cores at full rate. In PyTorch it is one line, no custom CUDA and no kernel to build, on version 2.7 or newer:</p>
+
+      <div class="snippet"><span class="c"># fp16 inputs already; flip the accumulator to full rate</span><br>torch.backends.cuda.matmul.allow_fp16_accumulation = True</div>
+
+      <p>The cost is numerical. The fp16 sum accumulates rounding and lands near 1e-3 relative error on these problems, against about 3.5e-4 for fp32 accumulation and about 1e-6 for a true-fp32 solve. The rest of this page measures the speed gained and the accuracy given up.</p>
+
+      <details class="deep">
+        <summary>Why the fp16 sum lands near 1e-3, and why fp32 accumulation is the safe default</summary>
+        <div class="body">
+          <p>A dot product of length n adds n products one after another. Once the partial sum grows large, a new product smaller than the sum's fp16 step size rounds away entirely, a loss called <b>swamping</b>. fp16 carries about 10 mantissa bits, so after thousands of adds the discarded low bits total a relative error near 1e-3. The measured applies land at 2.3e-3 (PDE, inner dimension 9,216) and 3.4e-3 (solve, inner dimension 8,192); the exact figure depends on the operator's conditioning and the spread of magnitudes in the sum, not on the length alone.</p>
+          <p>fp32 carries 23 mantissa bits, so the same sums stay near 3.5e-4 to 3.9e-4, and the true-fp32 CUDA-core path reaches about 1e-6. Keeping the accumulator in fp32 is the safe default because it protects any input; flipping it to fp16 is a deliberate trade for full-rate throughput where the extra error is below what the problem already carries.</p>
+        </div>
+      </details>
+
+      <h3 class="blk">One lever, three domains</h3>
+      <p class="sub">The same fp16-accumulate flag carries across a family of projects. The flag is identical; the workloads differ.</p>
+      <div class="cards">
+        <div class="card">
+          <div class="tag ship">this repo</div>
+          <h3>physics-frontier</h3>
+          <p>Dense physics solves on an RTX 3080. Matrix-inverse apply <span class="fig">1.91×</span>, PDE Green's-function apply <span class="fig">1.84×</span>, each at about 1e-3 relative error.</p>
+        </div>
+        <div class="card">
+          <div class="tag">sibling · same lever</div>
+          <h3>nerf-frontier</h3>
+          <p>The same full-rate fp16-accumulate flag, applied to neural-field rendering. Method and measurements live in its own repo: <a href="https://github.com/Unified-Sciences/nerf-frontier">nerf-frontier</a>.</p>
+        </div>
+        <div class="card">
+          <div class="tag">sibling · same lever</div>
+          <h3>search-frontier</h3>
+          <p>The same flag, applied to vector search. Method and measurements live in its own repo: <a href="https://github.com/Unified-Sciences/search-frontier">search-frontier</a>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================= RESULTS ============================= -->
+    <section class="sec" id="results">
+      <p class="eyebrow"><span class="n">03</span> measured</p>
+      <h2>Two workloads, measured on one RTX 3080</h2>
+      <p class="sub">Both apply a dense operator to a block of many right-hand sides. The fair baseline is the fp32-accumulate tensor path, the cuBLAS default; the lever is the same kernel with the fp16 accumulator. True fp32 is the CUDA-core path, shown for context, and comparing the lever against it overstates the win.</p>
+
+      <p class="sub" style="margin-top:20px">The bars below replay the two applies of the inverse workload at their measured wall-clock times. Press replay to watch fp16-accumulate finish first.</p>
+
+      <section class="scope" aria-label="GEMM apply race">
+        <div class="scope-head">
+          <span class="scope-title">apply A⁻¹ to 2048 right-hand sides · fp32-acc vs fp16-acc</span>
+          <button class="replay" id="replay">▶ replay</button>
+        </div>
+        <div class="lane slow" id="lane-slow">
+          <div class="lane-top"><span class="lane-name"><span class="dot"></span><b>—</b></span><span class="lane-read"><b class="ms">0.00</b> ms · <b class="tf">—</b> TFLOP/s</span></div>
+          <div class="track"><div class="fill"></div><div class="playhead" style="left:0"></div></div>
+        </div>
+        <div class="lane fast" id="lane-fast">
+          <div class="lane-top"><span class="lane-name"><span class="dot"></span><b>—</b></span><span class="lane-read"><b class="ms">0.00</b> ms · <b class="tf">—</b> TFLOP/s</span></div>
+          <div class="track"><div class="fill"></div><div class="playhead" style="left:0"></div></div>
+        </div>
+        <div class="verdict" id="verdict"></div>
+      </section>
+
+      <h3 class="blk">Matrix inverse · apply A⁻¹ to 2048 right-hand sides</h3>
+      <p class="sub">A dense Gaussian-process / RBF kernel matrix A = K + λI, 8,192 centers, condition number 101. The inverse is formed once in fp32 (202&nbsp;ms), then each apply to a 2,048-column block is a 274.9&nbsp;GFLOP GEMM. Bars show achieved throughput (longer is faster); the right column is wall-clock per apply.</p>
+      <div class="ladder" id="solve-ladder"></div>
+
+      <h3 class="blk">PDE · screened-Poisson, 4096 sources</h3>
+      <p class="sub">The screened-Poisson operator (I − α∇²) on a 96×96 grid, 9,216 unknowns, condition number 146. Form the dense Green's operator M = (I − α∇²)⁻¹ once, then each apply to 4,096 source fields is a 695.8&nbsp;GFLOP GEMM.</p>
+      <div class="ladder" id="pde-ladder"></div>
+
+      <div class="stat">
+        <div class="big">≈1.9×<br><small>at one flag · same tensor cores</small></div>
+        <div class="txt"><b>The fp16 accumulator runs the cores at full rate.</b> 1.91× on the inverse apply (117.5 vs 61.6&nbsp;TFLOP/s) and 1.84× on the Green's-function apply (120.0 vs 65.2&nbsp;TFLOP/s), each at about 1e-3 relative error against an fp64 gold solve. The gain is throughput the fp32-accumulate default already left unused on this chip.</div>
+      </div>
+
+      <details class="deep">
+        <summary>Why the apply, not the factorization, is the number that matters</summary>
+        <div class="body">
+          <p>Forming the inverse of the 8,192×8,192 kernel costs 202&nbsp;ms once, in fp32. Each apply to a 2,048-column block costs 2.34&nbsp;ms. The factorization is paid a single time; the apply runs again for every new block of right-hand sides, every batch of sources, every ensemble member. Over a sweep of many blocks the apply is where the wall-clock accrues, which is why it is the operation put on the full-rate path.</p>
+          <p>The true-fp32 CUDA-core path finishes the same apply in 12.51&nbsp;ms (solve) and 30.09&nbsp;ms (PDE). Against it the fp16-accumulate path looks 5.35× and 5.19× faster, but that compares tensor cores to CUDA cores. The tensor path itself, fp32-accumulate to fp16-accumulate, is 1.91× and 1.84×.</p>
+        </div>
+      </details>
+    </section>
+
+    <!-- ============================= ACCURACY ============================= -->
+    <section class="sec accent" id="accuracy">
+      <p class="eyebrow"><span class="n">04</span> accuracy</p>
+      <h2>When ~1e-3 is fine, and when it is not</h2>
+      <p class="sub">The lever trades numerical precision for speed. Whether the trade is acceptable depends on the problem, not the hardware.</p>
+
+      <div class="primer">
+        <span class="h">When ~1e-3 is acceptable</span>
+        <p style="margin-bottom:0">fp16 accumulation lands at 2.3e-3 (PDE) and 3.4e-3 (solve) relative to an fp64 gold solve; fp32 accumulation holds 3.5e-4 to 3.9e-4. For Gaussian-process surrogates, uncertainty-quantification ensembles, RBF field interpolation, and machine-learning-for-physics, the inputs already carry more than 1e-3 of noise, so the accumulator error sits below the problem's own floor. Both operators here are well-conditioned (condition number 101 and 146) and each apply is independent, so the error does not amplify and nothing compounds across solves.</p>
+      </div>
+
+      <h3 class="blk">If you need better than 1e-3</h3>
+      <p class="sub">The fp32-accumulate tensor path holds 3.5e-4 to 3.9e-4 and still runs about 2.8× the CUDA-core path (4.46 vs 12.51&nbsp;ms on the solve, 10.67 vs 30.09&nbsp;ms on the PDE). It is the accurate middle setting when 1e-3 is too loose but the true-fp32 path is slower than you want.</p>
+
+      <h3 class="blk">Where the lever does not apply</h3>
+      <p class="sub"><b>Ill-conditioned operators.</b> A well-conditioned operator keeps the fp16 error bounded; a near-singular one amplifies it. The plain Poisson inverse magnifies small perturbations, so the benchmark uses the screened operator (I − α∇²), which is symmetric positive-definite and well-posed. On a stiff or near-singular system, stay on the fp32 path.</p>
+      <p class="sub"><b>Long time-marching.</b> Stepping a PDE forward in fp16 drifts. The smoothest mode of the screened operator barely changes per step, so its rounding error is never damped and accumulates over a long trajectory. The lever is for independent solves, where each apply carries its own error.</p>
+      <p class="sub"><b>Sub-1e-3 dense inverses.</b> The full fp16 path stores the inverse in fp16 and accumulates in fp16, landing at 3.4e-3 relative error and a 7.9e-3 residual. Improving that would need iterative refinement, and for a dense inverse each refinement step is itself a full GEMM, so a correction costs as much as the original solve. Newton–Schulz inversion fares worse in fp16, its early iterations increment below fp16 resolution and stall.</p>
+
+      <details class="deep">
+        <summary>Why the smoothest mode barely damps, and why Newton–Schulz stalls</summary>
+        <div class="body">
+          <p>The screened operator (I − α∇²) has eigenvalues near 1 for the smoothest modes and larger for the roughest. Its inverse multiplies the smoothest mode by nearly 1, so an fp16 time step neither grows nor shrinks it, and that mode's rounding error persists step after step until it dominates a long trajectory. An independent solve never sees this, because it applies the operator once and reports a single result.</p>
+          <p>Newton–Schulz builds an inverse by repeated matmuls, X ← X(2I − AX). Its early iterations make tiny corrections, and in fp16 those corrections fall below the accumulator's resolution and round to zero, so the iteration never gets moving. Both cases are reasons to keep those specific paths in fp32; the measured lever covers the block solve, where neither failure occurs.</p>
+        </div>
+      </details>
+
+      <div class="finds">
+        <div class="find"><h3>The apply is the recurring cost</h3><p>Form A⁻¹ once in <span class="fig">202&nbsp;ms</span>; each 2,048-column block is a <span class="fig">2.34&nbsp;ms</span> GEMM. The block apply, run for every batch, is where wall-clock accrues.</p></div>
+        <div class="find"><h3>Full rate is one flag away</h3><p>fp16 accumulation runs sm_86 tensor cores at <span class="fig">2×</span> the fp32-accumulate default. Measured <span class="fig">1.91×</span> and <span class="fig">1.84×</span>, no custom CUDA.</p></div>
+        <div class="find"><h3>~1e-3 is the price</h3><p>fp16-acc lands at <span class="fig">2.3–3.4e-3</span> vs fp64, below the noise floor of surrogates and UQ, above what stiff solves and time-marching tolerate.</p></div>
+        <div class="find"><h3>Measure against the right baseline</h3><p>Versus the CUDA-core path the apply looks <span class="fig">5.2–5.4×</span> faster, but that compares tensor cores to CUDA cores. The lever itself is <span class="fig">1.84–1.91×</span>.</p></div>
+      </div>
+    </section>
+
+    <!-- ============================= GLOSSARY ============================= -->
+    <section class="sec" id="glossary">
+      <p class="eyebrow"><span class="n">05</span> glossary</p>
+      <h2>Every term and tool, defined</h2>
+      <dl class="glossary">
+        <div class="defn"><dt>GEMM</dt><dd>General matrix-matrix multiply, C = A·B. The dense, regular core of most numerical linear algebra and the operation these workloads reduce to.</dd></div>
+        <div class="defn"><dt>Dense matrix</dt><dd>A matrix whose entries are mostly non-zero, so every one is stored and multiplied. The opposite of a sparse matrix, which skips zeros.</dd></div>
+        <div class="defn"><dt>Tensor core</dt><dd>A GPU unit that does a small matrix-multiply-and-accumulate per instruction, fed fp16 inputs, summing into an fp16 or fp32 accumulator.</dd></div>
+        <div class="defn"><dt>Accumulator</dt><dd>The running total a matmul adds its products into. Its precision is chosen separately from the input precision and, on sm_86, sets the throughput.</dd></div>
+        <div class="defn"><dt>Accumulate precision</dt><dd>Whether the running sum is kept in fp16 or fp32. fp16-accumulate is full rate on sm_86; fp32-accumulate is half rate but more accurate.</dd></div>
+        <div class="defn"><dt>fp16 / fp32 / fp64</dt><dd>16-, 32-, and 64-bit floating-point. Roughly 3, 7, and 16 decimal digits of precision. fp64 is used here only as the gold reference.</dd></div>
+        <div class="defn"><dt>sm_86 / consumer Ampere</dt><dd>The compute capability of GeForce Ampere GPUs, including the RTX 3080, where fp16-accumulate tensor math runs at twice the fp32-accumulate rate.</dd></div>
+        <div class="defn"><dt>RTX 3080</dt><dd>A consumer NVIDIA GPU (Ampere, sm_86, 10&nbsp;GB). The single card every number here was measured on.</dd></div>
+        <div class="defn"><dt>cuBLAS</dt><dd>NVIDIA's dense linear-algebra library, the GEMM backend under PyTorch. It defaults to fp32 accumulation for safety.</dd></div>
+        <div class="defn"><dt>allow_fp16_accumulation</dt><dd>The PyTorch flag (<code>torch.backends.cuda.matmul.allow_fp16_accumulation</code>) that switches cuBLAS to the full-rate fp16 accumulator. Requires PyTorch 2.7+.</dd></div>
+        <div class="defn"><dt>TF32</dt><dd>A 19-bit tensor-core format Ampere can substitute for fp32. Disabled in these benchmarks so the context baseline is a true fp32 CUDA-core solve.</dd></div>
+        <div class="defn"><dt>Right-hand side (RHS)</dt><dd>A column of the system A&#8202;X = B. Solving for many at once turns the apply into a wide, compute-bound GEMM.</dd></div>
+        <div class="defn"><dt>Dense linear solve</dt><dd>Finding X in A&#8202;X = B for a dense A. Factor or invert once, then apply to every block of right-hand sides.</dd></div>
+        <div class="defn"><dt>Condition number</dt><dd>How much a matrix amplifies input error. Low means well-conditioned and safe for fp16; the operators here are 101 and 146.</dd></div>
+        <div class="defn"><dt>Covariance / kernel matrix</dt><dd>A dense n×n matrix of pairwise similarities between data points. The object solved against in GP and kernel methods.</dd></div>
+        <div class="defn"><dt>GP / RBF kernel</dt><dd>Gaussian process with a radial-basis-function kernel, K<sub>ij</sub> = exp(−‖x<sub>i</sub>−x<sub>j</sub>‖²/2ℓ²). The dense system in the inverse benchmark.</dd></div>
+        <div class="defn"><dt>Kernel ridge regression</dt><dd>Regression that solves against K + λI, one of the methods whose predict step is the block apply measured here.</dd></div>
+        <div class="defn"><dt>Reduced-order model (ROM)</dt><dd>A simulation compressed onto a small basis, then advanced as a small dense system. Each step is a matmul over many parameter settings.</dd></div>
+        <div class="defn"><dt>Green's function</dt><dd>The solution operator of a linear PDE: apply it to the sources and get the field. Discretized, it is a dense matrix.</dd></div>
+        <div class="defn"><dt>Screened-Poisson</dt><dd>The operator (I − α∇²), also called modified-Helmholtz. Symmetric positive-definite and well-conditioned, so its inverse-apply is numerically clean.</dd></div>
+        <div class="defn"><dt>Arithmetic intensity</dt><dd>Math done per byte moved from memory. High intensity (many RHS) makes an apply compute-bound, so tensor-core rate is the ceiling.</dd></div>
+        <div class="defn"><dt>Compute-bound / memory-bound</dt><dd>Limited by math throughput versus by memory bandwidth. The block applies here are compute-bound, so the accumulator rate sets the speed.</dd></div>
+        <div class="defn"><dt>Relative error</dt><dd>‖X − X<sub>gold</sub>‖ / ‖X<sub>gold</sub>‖ against an fp64 solve. The accuracy figure traded for speed: ~1e-3 for fp16-acc, ~1e-6 for true fp32.</dd></div>
+        <div class="defn"><dt>Residual</dt><dd>‖A&#8202;X − B‖ / ‖B‖, how well X actually satisfies the system. The fp16 path's residual is 7.9e-3 on the inverse apply.</dd></div>
+        <div class="defn"><dt>Iterative refinement</dt><dd>Correcting a solve with extra steps. For a dense explicit inverse each step is a full GEMM, so it cannot cheaply pass the fp16 floor.</dd></div>
+        <div class="defn"><dt>Newton–Schulz iteration</dt><dd>Building an inverse by repeated matmuls, X ← X(2I − AX). Its small early corrections round to zero in fp16 and stall.</dd></div>
+        <div class="defn"><dt>TFLOP/s</dt><dd>Trillions of floating-point operations per second. Achieved throughput, the natural speed axis for a compute-bound GEMM.</dd></div>
+        <div class="defn"><dt>nerf-frontier / search-frontier</dt><dd>Sibling projects that apply the same fp16-accumulate flag to neural-field rendering and to vector search, respectively.</dd></div>
+      </dl>
+    </section>
+
+    <footer id="method"></footer>
+  </main>
+
+<script>
+const $=(s,r=document)=>r.querySelector(s);
+
+// achieved throughput (TFLOP/s) and wall-clock per apply (ms), measured on one RTX 3080.
+// bars key on TFLOP/s (longer is faster); tail shows ms per apply. relerr is vs an fp64 gold solve.
+const SOLVE={rungs:[
+ {label:"true fp32 (CUDA core)",tflops:22.0,ms:12.51,kind:"floor",note:"The fp32 CUDA-core path, no tensor cores, TF32 off. Shown for context; comparing the lever against it overstates the win. rel-err 1.3e-6 vs the fp64 gold solve."},
+ {label:"fp32-accumulate tensor",tflops:61.6,ms:4.46,kind:"baseline",note:"The fair baseline. fp16 inputs on the tensor cores with an fp32 accumulator, the safe default cuBLAS picks. rel-err 3.9e-4."},
+ {label:"fp16-accumulate tensor",tflops:117.5,ms:2.34,kind:"opt",note:"Same kernel, fp16 accumulator, full rate on sm_86. 1.91× the fp32-accumulate baseline (5.35× the CUDA-core path) at rel-err 3.4e-3, residual 7.9e-3."}
+]};
+const PDE={rungs:[
+ {label:"true fp32 (CUDA core)",tflops:23.1,ms:30.09,kind:"floor",note:"The fp32 CUDA-core path, TF32 off. Context only. rel-err 1.4e-6 vs the fp64 gold solve."},
+ {label:"fp32-accumulate tensor",tflops:65.2,ms:10.67,kind:"baseline",note:"The fair baseline: fp16 tensor path with an fp32 accumulator. rel-err 3.5e-4."},
+ {label:"fp16-accumulate tensor",tflops:120.0,ms:5.80,kind:"opt",note:"Same kernel, fp16 accumulator. 1.84× the fp32-accumulate baseline (5.19× the CUDA-core path) at rel-err 2.3e-3."}
+]};
+
+function ladder(elId,rungs){
+  const max=Math.max(...rungs.map(r=>r.tflops),1);
+  const L=$("#"+elId); if(!L) return; L.innerHTML="";
+  rungs.forEach(r=>{
+    const w=Math.max(4,(r.tflops/max)*100);
+    const mark={baseline:"■",floor:"·",neutral:"=",opt:"▸"}[r.kind]||"▸";
+    const el=document.createElement("div"); el.className="rung "+r.kind;
+    el.innerHTML=`<div class="rung-label"><span class="kindmark">${mark}</span>${r.label}</div>
+      <div class="bar-cell"><div class="bar" style="width:0%">${r.tflops.toFixed(1)} TFLOP/s</div></div>
+      <div class="rung-tail"><b>${r.ms.toFixed(2)}</b> ms/apply</div>
+      <p class="rung-note">${r.note||""}</p>`;
+    L.appendChild(el);
+    requestAnimationFrame(()=>{$(".bar",el).style.width=w+"%";});
+  });
+}
+
+let raceTimer=null;
+function setupRace(base,opt){
+  const laneS=$("#lane-slow"), laneF=$("#lane-fast");
+  if(!laneS||!laneF) return;
+  $(".lane-name b",laneS).textContent=base.label;
+  $(".lane-name b",laneF).textContent=opt.label;
+  const maxMs=Math.max(base.ms,opt.ms);
+  const reduce=matchMedia("(prefers-reduced-motion:reduce)").matches;
+  function paint(lane,r,el){
+    const p=Math.max(0,Math.min(1,el/r.ms));
+    $(".fill",lane).style.width=(p*100)+"%";
+    $(".playhead",lane).style.left=(p*100)+"%";
+    $(".ms",lane).textContent=Math.min(el,r.ms).toFixed(2);
+    $(".tf",lane).textContent=p>=1?r.tflops.toFixed(1):"—";
+  }
+  function finish(){
+    const d=base.ms-opt.ms, x=opt.tflops/base.tflops;
+    $("#verdict").innerHTML=`<b>${opt.label}</b> finishes ${d.toFixed(2)} ms sooner per apply, <b>${x.toFixed(2)}×</b> the throughput.`;
+  }
+  function run(){
+    clearInterval(raceTimer);
+    if(reduce){paint(laneS,base,base.ms);paint(laneF,opt,opt.ms);finish();return;}
+    const dur=2200, t0=performance.now(); $("#verdict").textContent="";
+    raceTimer=setInterval(()=>{
+      const el=((performance.now()-t0)/dur)*maxMs;
+      paint(laneS,base,el); paint(laneF,opt,el);
+      if(el>=maxMs){clearInterval(raceTimer);paint(laneS,base,base.ms);paint(laneF,opt,opt.ms);finish();}
+    },1000/60);
+  }
+  const btn=$("#replay"); if(btn) btn.onclick=run; run();
+}
+
+ladder("solve-ladder",SOLVE.rungs);
+ladder("pde-ladder",PDE.rungs);
+setupRace(SOLVE.rungs[1],SOLVE.rungs[2]);
+
+$("#method").innerHTML=`<b>Hardware</b> 1× NVIDIA RTX 3080 10&nbsp;GB · Ampere sm_86 · torch 2.12 + CUDA 13 · pure PyTorch, no custom CUDA (PyTorch 2.7+ for the flag).<br>
+  <b>Matrix inverse</b> dense GP/RBF kernel A = K + λI · n=8192 · 2048 RHS · cond 101 · one-time fp32 inverse 202&nbsp;ms · apply 274.9&nbsp;GFLOP (bench_solve.py).<br>
+  <b>PDE</b> screened-Poisson (I − α∇²), α=2e-3 · 96×96 grid, N=9216 · 4096 sources · cond 146 · dense Green's operator applied · 695.8&nbsp;GFLOP (bench_pde.py).<br>
+  <span class="caveat">The lever is fp32-accumulate → fp16-accumulate on the fp16 tensor path (same kernel, only the accumulator differs): 1.91× and 1.84×. True fp32 is the CUDA-core path, shown for context only; the 5.35×/5.19× figures compare tensor cores to CUDA cores and overstate the lever. Relative error is vs an fp64 gold solve: fp16-accumulate 2.3–3.4e-3, fp32-accumulate 3.5–3.9e-4, true fp32 ~1e-6. The full fp16 path also stores the inverse in fp16, flooring accuracy near 1e-3 (solve residual 7.9e-3), so iterative refinement cannot cheaply pass it for a dense operator. Both operators are well-conditioned (cond ~100–146) and each apply is independent, so there is no error accumulation. The lever is for solves; fp16 time-marching of a PDE drifts and Newton–Schulz inversion stalls in fp16. Reduced-order models are described but not separately benchmarked. Sibling-project domains are named from their repos; see those repos for their numbers.</span>`;
+</script>
+</body>
+</html>
